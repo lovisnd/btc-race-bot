@@ -16,6 +16,12 @@
 //       - MAX_HOLD bars have passed since entry (don't ride a dead bounce).
 //   * No new entries in the last NO_ENTRY_TAIL bars: a position opened there
 //     would be flattened at the window's last close with no time to revert.
+//   * Insurance: if the primary entry has not fired once by mid-window
+//     (INSURANCE_ARM_BAR), one looser dip trade (INSURANCE_DIP_BPS /
+//     INSURANCE_TURN_BPS, same exits) is allowed, so a calm window still
+//     leaves the entry with at least one trade instead of sitting out the
+//     whole race in cash. It never fires on a window where the primary
+//     entry already traded.
 //
 // Why this shape: on a 24h window the pool's price mostly grinds with the
 // market and only occasionally snaps away from its hourly mean and snaps
@@ -37,6 +43,9 @@ const MAX_HOLD = 600; // exit: bars since entry
 const NO_ENTRY_TAIL = 120; // no new entries in the last this many bars
 const WINDOW_BARS = 1440; // both windows are 1440 one-minute bars
 const MAX_SLIPPAGE_BPS = 100; // 1% past the close the order was decided on
+const INSURANCE_ARM_BAR = 720; // mid-window: primary must have fired by now
+const INSURANCE_DIP_BPS = 30n; // insurance entry: a shallower dip suffices
+const INSURANCE_TURN_BPS = 5n; // insurance entry: a smaller turn suffices
 
 /** Closes of the symbol, oldest first, appended once per bar that carries it. */
 const closes: bigint[] = [];
@@ -44,6 +53,8 @@ const closes: bigint[] = [];
 let entryBar = -1;
 /** How many bars of the symbol have been seen so far. */
 let barsSeen = 0;
+/** Whether the primary entry has fired at least once in this window. */
+let traded = false;
 
 /** The simple moving average of the last n closes, truncated to an integer. */
 function sma(n: number): bigint {
@@ -85,13 +96,18 @@ await runBars({
     // before it can revert.
     if (closes.length < SMA_BARS || closes.length < 6) return [];
     if (barsSeen > WINDOW_BARS - NO_ENTRY_TAIL) return [];
+    // The insurance thresholds apply only while the primary entry has never
+    // fired and mid-window has passed; otherwise the strict ones do.
+    const dipBps = !traded && barsSeen - 1 >= INSURANCE_ARM_BAR ? INSURANCE_DIP_BPS : DIP_BPS;
+    const turnBps = !traded && barsSeen - 1 >= INSURANCE_ARM_BAR ? INSURANCE_TURN_BPS : TURN_BPS;
     const avg = sma(SMA_BARS);
-    if (close * 10000n >= avg * (10000n - DIP_BPS)) return [];
+    if (close * 10000n >= avg * (10000n - dipBps)) return [];
     const fiveAgo = closes[closes.length - 6];
-    if ((close - fiveAgo) * 10000n < fiveAgo * TURN_BPS) return [];
+    if ((close - fiveAgo) * 10000n < fiveAgo * turnBps) return [];
     const notional = state.cash;
     if (notional < BigInt(state.hello.fees.min_notional_quote_units)) return [];
     entryBar = barsSeen - 1;
+    traded = true;
     const buy: BuyInput = { side: 'buy', symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS };
     return [buy];
   },
